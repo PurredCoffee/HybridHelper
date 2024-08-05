@@ -12,6 +12,7 @@ public enum CheckpointHybridSetting {
 public class HybridHelperModuleSettings : EverestModuleSettings {
     [SettingSubText("Ensure that you have paceping disabled")]
     public bool RandomizeGoldenBerries { get; set; } = false;
+
     [SettingSubHeader("Disable Checkpoints")]
     public Dictionary<string, CheckpointHybridSetting> DisableCheckpoint { get; set; } = new Dictionary<string, CheckpointHybridSetting>();
 
@@ -47,6 +48,9 @@ public class DisableDisplayHandler {
             return;
         }
         string levelName = HybridHelperModule.currentMapData.Area.SID;
+        if(levelName.StartsWith("Celeste_")) {
+            levelName = levelName.Substring(8);
+        }
         string levelDisplayName = Dialog.Clean(levelName);
         TextMenuExt.SubMenu subMenu = new TextMenuExt.SubMenu(levelDisplayName + " Checkpoints", false);
         createDisableBool(subMenu, levelName + "/Start", "Start");

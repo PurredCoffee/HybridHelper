@@ -46,12 +46,33 @@ public class HybridHelperModule : EverestModule
     
     static Session.CoreModes originalCoreMode;
     static bool originalDreaming;
-    private static bool ShouldTeleportPlayerToNextCheckpoint(LevelData playerLevel, Level currentLevel)
+
+    private static bool HasGoldenBerry(Player player)
     {
-        if(!Settings.RandomizeGoldenBerries || lastTeleportedLevel == playerLevel) {
+        return player.Leader.Followers.FirstOrDefault((Follower f) => f.Entity.GetType() == typeof(Strawberry) && (f.Entity as Strawberry).Golden && !(f.Entity as Strawberry).Winged) != null;
+    }
+
+    private static bool HasPlatinumBerry(Player player)
+    {
+        foreach (Follower follower in player.Leader.Followers)
+        {
+            if (follower.Entity.GetType().Name == "PlatinumBerry")
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool ShouldTeleportPlayerToNextCheckpoint(LevelData playerLevel, Player player)
+    {
+        if(!Settings.RandomizeGoldenBerries) {
             return false;
         }
-        if(OrderOfLevels.Count == 0 || OrderOfLevels[0] == playerLevel) {
+        if (lastTeleportedLevel == playerLevel) {
+            return false;
+        }
+        if(OrderOfLevels.Count == 0) {
             return false;
         }
         bool foundLevel = false;
@@ -66,12 +87,9 @@ public class HybridHelperModule : EverestModule
         {
             return false;
         }
-        foreach (Strawberry item in currentLevel.Entities.FindAll<Strawberry>())
+        if (HasGoldenBerry(player) || HasPlatinumBerry(player))
         {
-            if (item.Golden && item.Follower.Leader != null)
-            {
-                return true;
-            }
+            return true;
         }
         return false;
     }
@@ -81,10 +99,6 @@ public class HybridHelperModule : EverestModule
         bool foundCheckpoint = false;
         foreach(CheckpointData checkpoint in currentMapData.ModeData.Checkpoints) {
             if(checkpoint.Level == lastTeleportedLevel.Name) {
-                Logger.Log(LogLevel.Info, "HybridHelperModule", "Teleporting player to checkpoint: " + checkpoint.Name);
-                Logger.Log(LogLevel.Info, "HybridHelperModule", "Inventory: " + ((checkpoint.Inventory != null)? "true" : "false"));
-                Logger.Log(LogLevel.Info, "HybridHelperModule", "CoreMode: " + checkpoint.CoreMode);
-                Logger.Log(LogLevel.Info, "HybridHelperModule", "Dreaming: " + checkpoint.Dreaming);
                 if(checkpoint.Inventory != null) {
                     PlayerInventory inv = (PlayerInventory)checkpoint.Inventory;
                     level.Session.Inventory = inv;
@@ -105,7 +119,6 @@ public class HybridHelperModule : EverestModule
             }
         }
         if(!foundCheckpoint) {
-            Logger.Log(LogLevel.Warn, "HybridHelperModule", "No checkpoint found for level: " + lastTeleportedLevel.Name);
             level.Session.Inventory = currentMapData.ModeData.Inventory;
             level.coreMode = currentMapData.Data.CoreMode;
             if(!currentMapData.Data.Dreaming) {
@@ -129,7 +142,6 @@ public class HybridHelperModule : EverestModule
         player.Speed = Vector2.Zero;
         lastTeleportedLevel = OrderOfLevels[0];
         OrderOfLevels.RemoveAt(0);
-        Level level = player.SceneAs<Level>();
         Vector2? spawnOffset = null;
         foreach(EntityData entity in lastTeleportedLevel.Entities) {
             if(entity.Name == "checkpoint") {
@@ -140,6 +152,7 @@ public class HybridHelperModule : EverestModule
                 break;
             }
         }
+        Level level = player.SceneAs<Level>();
         UpdateModesFromCheckpoint(level);
         level.TeleportTo(player, lastTeleportedLevel.Name, Player.IntroTypes.Respawn, spawnOffset);
     }
@@ -203,14 +216,72 @@ public class HybridHelperModule : EverestModule
         }
         OrderOfLevels.Add(lastCP);
     }
-    
+
+    public static bool teleporting = false;
+    private static bool initateTeleport(Player player, Level level, LevelData next)
+    {
+        if(teleporting) {
+            return true;
+        }
+        teleporting = true;
+        if(OrderOfLevels.Count > 0 && OrderOfLevels[0] == next) {
+            lastTeleportedLevel = OrderOfLevels[0];
+            OrderOfLevels.RemoveAt(0);
+            teleporting = false;
+            return false;
+        } else {
+            new FadeWipe(level, false, () => {
+                level.OnEndOfFrame += () =>  {
+                    TeleportPlayerToNextCheckpoint(player);
+                    teleporting = false;
+                };
+            }).Duration = 0.1f;
+            return true;
+        }
+    }
+
     public override void Load()
     {
         //hook for when a map is loaded
         On.Celeste.MapData.StartLevel += MapData_StartLevel;
         On.Celeste.Level.TransitionTo += Level_TransitionTo;
-        On.Celeste.Strawberry.OnPlayer += Strawberry_OnPlayer;
+        On.Celeste.Level.Update += Level_Update;
         On.Celeste.Strawberry.Added += Strawberry_Added;
+    }
+
+    static bool hadGoldenBerryLastFrame = false;
+    static int goldenBerryLenience = 0;
+    private static void Level_Update(On.Celeste.Level.orig_Update orig, Level self)
+    {
+        orig(self);
+        if(!Settings.RandomizeGoldenBerries || currentMapData == null) {
+            return;
+        }
+        Player player = self.Tracker.GetEntity<Player>();
+        if(player == null) {
+            return;
+        }
+        bool hasGoldenBerry = HasGoldenBerry(player) || HasPlatinumBerry(player);
+
+        if(!hadGoldenBerryLastFrame && hasGoldenBerry) {
+            ShuffleOrderOfLevels(self.Session.LevelData);
+            originalCoreMode = self.coreMode;
+            originalDreaming = currentMapData.Data.Dreaming;
+
+            initateTeleport(player, self, self.Session.LevelData);
+        }
+        //player can have frames where they have a golden berry but it doesn't count as having it yet
+        //this is to prevent the player from being counted as not having a golden berry when they do
+        if(goldenBerryLenience > 0) {
+            goldenBerryLenience--;
+        }
+        if(hasGoldenBerry) {
+            goldenBerryLenience = 5;
+            hadGoldenBerryLastFrame = true;
+        }
+        if(!hasGoldenBerry && goldenBerryLenience == 0) {
+            hadGoldenBerryLastFrame = false;
+        }
     }
 
     private static void Strawberry_Added(On.Celeste.Strawberry.orig_Added orig, Strawberry self, Scene scene)
@@ -233,30 +304,6 @@ public class HybridHelperModule : EverestModule
         }
     }
 
-    private static void Strawberry_OnPlayer(On.Celeste.Strawberry.orig_OnPlayer orig, Strawberry self, Player player)
-    {
-        //if enabled, not collected, and golden, randomize the order of checkpoints and teleport the player to the next checkpoint
-        if(!Settings.RandomizeGoldenBerries || self.Follower.Leader != null || self.collected || !self.Golden) {
-            orig(self, player);
-            return;
-        }
-        ShuffleOrderOfLevels(self.SceneAs<Level>().Session.LevelData);
-        if(OrderOfLevels[0] == self.SceneAs<Level>().Session.LevelData) {
-            OrderOfLevels.RemoveAt(0);
-            orig(self, player);
-            return;
-        }
-
-        originalCoreMode = self.SceneAs<Level>().coreMode;
-        originalDreaming = currentMapData.Data.Dreaming;
-        
-        new FadeWipe(player.SceneAs<Level>(), false, () => {
-            //add current room to the list of levels with checkpoints
-            self.SceneAs<Level>().OnEndOfFrame += () => TeleportPlayerToNextCheckpoint(player);
-        }).Duration = 0.1f;
-        orig(self, player);
-    }
-
     private static LevelData MapData_StartLevel(On.Celeste.MapData.orig_StartLevel orig, MapData self)
     {
         LevelData returnobj = orig(self);
@@ -272,44 +319,22 @@ public class HybridHelperModule : EverestModule
         return returnobj;
     }
 
-    static bool transitioning = false;
     private static void Level_TransitionTo(On.Celeste.Level.orig_TransitionTo orig, Level self, LevelData next, Vector2 direction)
     {
-        //handled by ShouldTeleportPlayerToNextCheckpoint but to avoid future bugs, check if the setting is enabled
-        if(!Settings.RandomizeGoldenBerries) {
+        if(!Settings.RandomizeGoldenBerries || !ShouldTeleportPlayerToNextCheckpoint(next, self.Tracker.GetEntity<Player>()) || next == lastTeleportedLevel) {    
             orig(self, next, direction);
             return;
         }
-        if(!ShouldTeleportPlayerToNextCheckpoint(next, self)) {
-            if(OrderOfLevels.Count > 0 && OrderOfLevels[0] == next) {
-                OrderOfLevels.RemoveAt(0);
-            }
+        if(!initateTeleport(self.Tracker.GetEntity<Player>(), self, next)) {
             orig(self, next, direction);
-            return;
         }
-        if(next == lastTeleportedLevel) {
-            orig(self, next, direction);
-            return;
-        }
-        if(transitioning)
-        {
-            return;
-        }
-        transitioning = true;
-        new FadeWipe(self, false, () => {
-            self.OnEndOfFrame += () =>  {
-                TeleportPlayerToNextCheckpoint(self.Tracker.GetEntity<Player>());
-                transitioning = false;
-            };
-        }).Duration = 0.1f;
-        // don't call orig, we're teleporting the player to the next checkpoint and dont transition to the next level
     }
 
     public override void Unload()
     {
         On.Celeste.MapData.StartLevel -= MapData_StartLevel;
         On.Celeste.Level.TransitionTo -= Level_TransitionTo;
-        On.Celeste.Strawberry.OnPlayer -= Strawberry_OnPlayer;
+        On.Celeste.Level.Update -= Level_Update;
         On.Celeste.Strawberry.Added -= Strawberry_Added;
     }
 }
